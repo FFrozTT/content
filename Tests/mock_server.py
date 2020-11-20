@@ -8,7 +8,6 @@ import time
 import unicodedata
 import urllib3
 import demisto_client.demisto_api
-from timeout_decorator import timeout, TimeoutError
 from subprocess import call, check_call, check_output, CalledProcessError, STDOUT
 
 from demisto_sdk.commands.common.tools import print_color, print_error, print_warning, \
@@ -174,7 +173,8 @@ class MITMProxy:
 
     PROXY_PORT = '9997'
     MOCKS_TMP_PATH = '/tmp/Mocks/'
-    MOCKS_GIT_PATH = 'content-test-data/'
+    MOCKS_GIT_PATH = f'{AMIConnection.REMOTE_HOME}content-test-data/'
+    TIME_TO_WAIT_FOR_PROXY_SECONDS = 30
 
     def __init__(self, public_ip,
                  repo_folder=MOCKS_GIT_PATH, tmp_folder=MOCKS_TMP_PATH):
@@ -264,7 +264,7 @@ class MITMProxy:
         """
         src_filepath = os.path.join(self.tmp_folder, get_mock_file_path(playbook_id))
         src_files = os.path.join(self.tmp_folder, get_folder_path(playbook_id) + '*')
-        dst_folder = os.path.join(AMIConnection.REMOTE_HOME, self.repo_folder, get_folder_path(playbook_id))
+        dst_folder = os.path.join(self.repo_folder, get_folder_path(playbook_id))
 
         if not self.has_mock_file(playbook_id):
             prints_manager.add_print_job('Mock file not created!', print, thread_index)
@@ -387,14 +387,15 @@ class MITMProxy:
             is_record (bool):  Indicates whether this is a record run or not
         """
         self._start_mitmdump_service()
-        try:
-            self.wait_until_proxy_is_listening()
+        was_proxy_up = self.wait_until_proxy_is_listening()
+        if was_proxy_up:
             prints_manager.add_print_job(f'Proxy service started in {self.get_script_mode(is_record)} mode',
                                          print_color,
                                          thread_index,
                                          message_color=LOG_COLORS.GREEN)
-        except TimeoutError as err:
-            prints_manager.add_print_job(f'Proxy failed to start, Error: {err}', print_error, thread_index)
+        else:
+            prints_manager.add_print_job(f'Proxy failed to start after {self.TIME_TO_WAIT_FOR_PROXY_SECONDS} seconds',
+                                         print_error, thread_index)
             self.get_mitmdump_service_status(prints_manager, thread_index)
 
     def _start_mitmdump_service(self) -> None:
@@ -425,7 +426,7 @@ class MITMProxy:
                             prints_manager,
                             thread_index: int) -> bool:
         """
-        Does all needed preparation for starting the proxy service which include:
+        Writes proxy server run configuration options to the remote host, the details of which include:
         - Creating new tmp directory on remote machine if in record mode and moves the problematic keys file in to it
         - Creating the mitmdump_rc file that includes the script mode, keys file path, mock file path and log file path
           for the mitmdump service and puts it in '/home/ec2-user/mitmdump_rc' in the remote machine.
@@ -441,19 +442,12 @@ class MITMProxy:
         path = path or self.current_folder
         folder_path = get_folder_path(playbook_id)
 
-        repo_problem_keys_path = os.path.join(AMIConnection.REMOTE_HOME,
-                                              self.repo_folder,
-                                              folder_path,
-                                              'problematic_keys.json')
-        current_problem_keys_path = os.path.join(AMIConnection.REMOTE_HOME,
-                                                 path,
-                                                 folder_path,
-                                                 'problematic_keys.json')
-        log_file_path = os.path.join(AMIConnection.REMOTE_HOME, path, get_log_file_path(playbook_id, record))
-        mock_file_path = os.path.join(AMIConnection.REMOTE_HOME, path, get_mock_file_path(playbook_id))
+        repo_problem_keys_path = os.path.join(self.repo_folder, folder_path, 'problematic_keys.json')
+        current_problem_keys_path = os.path.join(path, folder_path, 'problematic_keys.json')
+        log_file_path = os.path.join(path, get_log_file_path(playbook_id, record))
+        mock_file_path = os.path.join(path, get_mock_file_path(playbook_id))
 
-        file_content = ''
-        file_content += f'export KEYS_FILE_PATH="{current_problem_keys_path if record else repo_problem_keys_path}"\n'
+        file_content = f'export KEYS_FILE_PATH="{current_problem_keys_path if record else repo_problem_keys_path}"\n'
         file_content += f'export SCRIPT_MODE={self.get_script_mode(record)}\n'
         file_content += f'export MOCK_FILE_PATH="{mock_file_path}"\n'
         file_content += f'export LOG_FILE_PATH="{log_file_path}"\n'
@@ -498,15 +492,16 @@ class MITMProxy:
                                          thread_index)
         return False
 
-    @timeout(5, exception_message='Mitmdump failed to start after 5 seconds', use_signals=False)
     def wait_until_proxy_is_listening(self):
         """
-        Checks if the mitmdump service is listening, and raises an exception if 5 minutes pass without positive answer
+        Checks if the mitmdump service is listening, and raises an exception if 30 seconds pass without positive answer
         """
-        proxy_is_listening = False
-        while not proxy_is_listening:
+        for i in range(self.TIME_TO_WAIT_FOR_PROXY_SECONDS):
             proxy_is_listening = self.is_proxy_listening()
+            if proxy_is_listening:
+                return True
             time.sleep(1)
+        return False
 
     def is_proxy_listening(self) -> bool:
         """
