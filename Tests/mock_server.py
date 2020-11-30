@@ -457,9 +457,15 @@ class MITMProxy:
         # when recording, copy the `problematic_keys.json` for the test to current temporary directory if it exists
         # that way previously recorded or manually added keys will only be added upon and not wiped with an overwrite
         if record:
-            silence_output(self.ami.call,
-                           ['mv', repo_problem_keys_path, current_problem_keys_path],
-                           stdout='null')
+            try:
+                silence_output(self.ami.call,
+                               ['mv', repo_problem_keys_path, current_problem_keys_path],
+                               stdout='null')
+            except CalledProcessError as e:
+                prints_manager.add_print_job(f'Failed to move problematic_keys.json. Error {e.output}',
+                                             print_error,
+                                             thread_index)
+
         return self._write_mitmdump_rc_file_to_host(file_content, prints_manager, thread_index)
 
     def _write_mitmdump_rc_file_to_host(self,
@@ -480,10 +486,8 @@ class MITMProxy:
         Returns:
             True if file was successfully copied to the server, else False
         """
-        with open('mitmdump_rc', 'w') as mitmdump_rc:
-            mitmdump_rc.write(file_content)
         try:
-            self.ami.copy_file('mitmdump_rc', dst=AMIConnection.REMOTE_HOME)
+            self.ami.call(['echo', f"'{file_content}'", '>', os.path.join(AMIConnection.REMOTE_HOME, 'mitmdump_rc')])
             return True
         except CalledProcessError as err:
             prints_manager.add_print_job(f'Could not copy arg file for mitmdump service to server {self.ami.public_ip},'
